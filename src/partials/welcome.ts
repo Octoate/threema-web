@@ -15,6 +15,10 @@
  * along with Threema Web. If not, see <http://www.gnu.org/licenses/>.
  */
 
+// tslint:disable:no-reference
+
+/// <reference path="../types/broadcastchannel.d.ts" />
+
 import {BrowserService} from '../services/browser';
 import {ControllerService} from '../services/controller';
 import {TrustedKeyStoreService} from '../services/keystore';
@@ -42,6 +46,8 @@ class DialogController {
 class WelcomeController {
 
     private static REDIRECT_DELAY = 500;
+
+    private logTag: string = '[WelcomeController]';
 
     // Angular services
     private $scope: ng.IScope;
@@ -213,7 +219,7 @@ class WelcomeController {
      * Initiate a new session by scanning a new QR code.
      */
     private scan(): void {
-        this.$log.info('Initialize session by scanning QR code...');
+        this.$log.info(this.logTag, 'Initialize session by scanning QR code...');
 
         // Initialize webclient with new keystore
         this.webClientService.init();
@@ -232,7 +238,7 @@ class WelcomeController {
      * Initiate a new session by unlocking a trusted key.
      */
     private unlock(): void {
-        this.$log.info('Initialize session by unlocking trusted key...');
+        this.$log.info(this.logTag, 'Initialize session by unlocking trusted key...');
     }
 
     /**
@@ -247,46 +253,81 @@ class WelcomeController {
         // Instantiate new keystore
         const keyStore = new saltyrtcClient.KeyStore(decrypted.ownSecretKey);
 
-        // Check if there are other tabs running on the same session
-        if ('BroadcastChannel' in self) {
-            const channel = new BroadcastChannel('session-check');
-            channel.onmessage = (event: MessageEvent) => {
-                const message = JSON.parse(event.data);
-                this.$log.debug(message); // TODO: REMOVE
-                switch (message.type) {
-                    case 'publicKey':
-                        if (message.key === keyStore.publicKeyHex) {
-                            channel.postMessage(JSON.stringify({
-                                type: 'open',
-                                key: keyStore.publicKeyHex,
-                            }));
-                        }
-                        break;
-                    case 'open':
-                        if (message.key === keyStore.publicKeyHex) {
-                            this.$log.error('SESSION ALREADY OPEN');
-                        }
-                        break;
-                    default:
-                        this.$log.warn('Unknown session-check message type:', message.type);
-                        break;
-                }
-            };
-            this.$log.debug('Checking if the session is already open');
-            channel.postMessage(JSON.stringify({
-                type: 'publicKey',
-                key: keyStore.publicKeyHex,
-            }));
-        }
+        // Set up the broadcast channel that checks whether we're already connected in another tab
+        this.setupBroadcastChannel(keyStore);
 
         // Initialize push service
         if (decrypted.pushToken !== null) {
             this.pushService.init(decrypted.pushToken);
-            this.$log.debug('Initialize push service');
+            this.$log.debug(this.logTag, 'Initialize push service');
         }
 
         // Reconnect
         this.reconnect(keyStore, decrypted.peerPublicKey);
+    }
+
+    /**
+     * Set up a `BroadcastChannel` to check if there are other tabs running on
+     * the same session.
+     */
+    private setupBroadcastChannel(keyStore: saltyrtc.KeyStore) {
+        if (!('BroadcastChannel' in this.$window)) {
+            // No BroadcastChannel support in this browser
+            return;
+        }
+
+        // Config constants
+        const CHANNEL_NAME = 'session-check';
+        const TYPE_PUBLIC_KEY = 'public-key';
+        const TYPE_ALREADY_OPEN = 'already-open';
+
+        // Set up new BroadcastChannel
+        const channel = new BroadcastChannel(CHANNEL_NAME);
+
+        // Register a message handler
+        channel.onmessage = (event: MessageEvent) => {
+            const message = JSON.parse(event.data);
+            switch (message.type) {
+                case TYPE_PUBLIC_KEY:
+                    // Another tab is trying to connect to a session.
+                    // Is it the same public key as the one we are using?
+                    if (message.key === keyStore.publicKeyHex
+                            && (this.stateService.connectionBuildupState === 'loading'
+                             || this.stateService.connectionBuildupState === 'done')) {
+                        // Yes it is, notify them that the session is already active
+                        this.$log.debug(
+                            this.logTag,
+                            'Another tab is trying to connect to our session. Respond with a broadcast.',
+                        );
+                        channel.postMessage(JSON.stringify({
+                            type: TYPE_ALREADY_OPEN,
+                            key: keyStore.publicKeyHex,
+                        }));
+                    }
+                    break;
+                case TYPE_ALREADY_OPEN:
+                    // Another tab notified us that the session we're trying to connect to
+                    // is already active.
+                    if (message.key === keyStore.publicKeyHex && this.stateService.connectionBuildupState !== 'done') {
+                        this.$log.error(this.logTag, 'Session already connected in another tab or window');
+                        this.$timeout(() => {
+                            this.stateService.updateConnectionBuildupState('already_connected');
+                            this.stateService.state = 'error';
+                        }, 500);
+                    }
+                    break;
+                default:
+                    this.$log.warn(this.logTag, 'Unknown broadcast message type:', message.type);
+                    break;
+            }
+        };
+
+        // Notify other tabs that we're trying to connect
+        this.$log.debug(this.logTag, 'Checking if the session is already open in another tab or window');
+        channel.postMessage(JSON.stringify({
+            type: TYPE_PUBLIC_KEY,
+            key: keyStore.publicKeyHex,
+        }));
     }
 
     /**
@@ -340,6 +381,19 @@ class WelcomeController {
             parent: angular.element(document.body),
             clickOutsideToClose: true,
             fullscreen: true,
+        });
+    }
+
+    /**
+     * Show the "already connected" dialog.
+     */
+    private showAlreadyConnected(): void {
+        this.$translate.onReady().then(() => {
+            const confirm = this.$mdDialog.alert()
+            .title(this.$translate.instant('welcome.ALREADY_CONNECTED'))
+            .htmlContent(this.$translate.instant('welcome.ALREADY_CONNECTED_DETAILS'))
+            .ok(this.$translate.instant('common.OK'));
+            this.$mdDialog.show(confirm);
         });
     }
 
@@ -405,7 +459,7 @@ class WelcomeController {
         } else if (len <= 586) {
             version = 16;
         } else {
-            this.$log.error('QR Code payload too large: Is your SaltyRTC host string huge?');
+            this.$log.error(this.logTag, 'QR Code payload too large: Is your SaltyRTC host string huge?');
             version = 40;
         }
         return {
@@ -437,7 +491,7 @@ class WelcomeController {
 
             // If an error occurs...
             (error) => {
-                this.$log.error('Error state:', error);
+                this.$log.error(this.logTag, 'Error state:', error);
                 // TODO: should probably show an error message instead
                 this.$timeout(() => this.$state.reload(), WelcomeController.REDIRECT_DELAY);
             },
