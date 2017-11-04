@@ -273,6 +273,7 @@ class WelcomeController {
     private setupBroadcastChannel(keyStore: saltyrtc.KeyStore) {
         if (!('BroadcastChannel' in this.$window)) {
             // No BroadcastChannel support in this browser
+            this.$log.warn(this.logTag, 'BroadcastChannel not supported in this browser');
             return;
         }
 
