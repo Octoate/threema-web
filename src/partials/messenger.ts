@@ -187,7 +187,6 @@ class ConversationController {
     // Scrolling
     public showScrollJump: boolean = false;
 
-    private stopTypingTimer: ng.IPromise<void> = null;
     public receiver: threema.Receiver;
     public type: threema.ReceiverType;
     public message: string = '';
@@ -549,31 +548,15 @@ class ConversationController {
     /**
      * We started typing.
      */
-    public startTyping = (text: string) => {
-        if (this.stopTypingTimer === null) {
-            // Notify app
-            this.webClientService.sendMeIsTyping(this.$stateParams, true);
-        } else {
-            // Stop existing timer
-            this.$timeout.cancel(this.stopTypingTimer);
-        }
-
-        // Define a timeout to send the stopTyping event
-        this.stopTypingTimer = this.$timeout(() => {
-            this.stopTyping();
-        }, 10000);
+    public startTyping = () => {
+        // Notify app
+        this.webClientService.sendMeIsTyping(this.$stateParams, true);
     }
 
     /**
      * We stopped typing.
      */
     public stopTyping = () => {
-        // Cancel timer if present
-        if (this.stopTypingTimer !== null) {
-            this.$timeout.cancel(this.stopTypingTimer);
-            this.stopTypingTimer = null;
-        }
-
         // Notify app
         this.webClientService.sendMeIsTyping(this.$stateParams, false);
     }

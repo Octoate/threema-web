@@ -82,7 +82,11 @@ export default [
                     composeDiv[0].innerText = scope.initialData.draft;
                 }
 
-                let caretPosition: {from?: number, to?: number} = null;
+                let caretPosition: {
+                    from?: number,
+                    to?: number,
+                    fromBytes?: number,
+                    toBytes?: number } = null;
 
                 /**
                  * Stop propagation of click events and hold htmlElement of the emojipicker
@@ -116,13 +120,37 @@ export default [
                     };
                 })();
 
-                // Submit the text from the compose area.
-                //
-                // Emoji images are converted to their alt text in this process.
-                function submitText(): Promise<any> {
-                    let text = '';
+                // Typing events
+                let stopTypingTimer: ng.IPromise<void> = null;
+                function stopTyping() {
+                    // We can only stop typing of the timer is set (meaning
+                    // that we started typing earlier)
+                    if (stopTypingTimer !== null) {
+                        // Cancel timer
+                        $timeout.cancel(stopTypingTimer);
+                        stopTypingTimer = null;
 
-                    // Process a DOM node recursively and extract text.
+                        // Send stop typing message
+                        scope.stopTyping();
+                    }
+                }
+                function startTyping() {
+                    if (stopTypingTimer === null) {
+                        // If the timer wasn't set previously, we just
+                        // started typing!
+                        scope.startTyping();
+                    } else {
+                        // Cancel timer, we'll re-create it
+                        $timeout.cancel(stopTypingTimer);
+                    }
+
+                    // Define a timeout to send the stopTyping event
+                    stopTypingTimer = $timeout(stopTyping, 10000);
+                }
+
+                // Process a DOM node recursively and extract text from compose area.
+                function getText(trim = true) {
+                    let text = '';
                     const visitChildNodes = (parentNode: HTMLElement) => {
                         // tslint:disable-next-line: prefer-for-of (see #98)
                         for (let i = 0; i < parentNode.childNodes.length; i++) {
@@ -149,9 +177,20 @@ export default [
                             }
                         }
                     };
-
-                    // Extract text
                     visitChildNodes(composeDiv[0]);
+                    return trim ? text.trim() : text;
+                }
+
+                // Determine whether field is empty
+                function composeAreaIsEmpty() {
+                    return getText().length === 0;
+                }
+
+                // Submit the text from the compose area.
+                //
+                // Emoji images are converted to their alt text in this process.
+                function submitText(): Promise<any> {
+                    const text = getText();
 
                     return new Promise((resolve, reject) => {
                         let submitTexts = (strings: string[]) => {
@@ -191,15 +230,16 @@ export default [
                 }
 
                 function sendText(): boolean {
-                    if  (composeDiv[0].innerHTML.length > 0) {
+                    if (!composeAreaIsEmpty()) {
                         submitText().then(() => {
                             // Clear compose div
                             composeDiv[0].innerText = '';
                             composeDiv[0].focus();
 
                             // Send stopTyping event
-                            scope.stopTyping();
+                            stopTyping();
 
+                            // Clear draft
                             scope.onTyping('');
 
                             updateView();
@@ -214,7 +254,7 @@ export default [
                 }
 
                 // Handle typing events
-                function onTyping(ev: KeyboardEvent): void {
+                function onKeyDown(ev: KeyboardEvent): void {
                     // If enter is pressed, prevent default event from being dispatched
                     if (!ev.shiftKey && ev.which === 13) {
                         ev.preventDefault();
@@ -230,15 +270,41 @@ export default [
                             }
                         }
 
-                        // Update typing information
-                        if (composeDiv[0].innerText.length === 0) {
-                            scope.stopTyping();
-                        } else {
-                            scope.startTyping(composeDiv[0].innerText);
+                        updateView();
+                    }, 0);
+                }
+
+                function onKeyUp(ev: KeyboardEvent): void {
+                    // At link time, the element is not yet evaluated.
+                    // Therefore add following code to end of event loop.
+                    $timeout(() => {
+
+                        // If the compose area contains only a single <br>, make it fully empty.
+                        // See also: https://stackoverflow.com/q/14638887/284318
+                        let text = getText(false);
+                        if (text === '\n') {
+                            composeDiv[0].innerText = '';
+                        } else if (ev.keyCode === 190) {
+                            // A ':' is pressed, try to parse
+                            let currentWord = stringService.getWord(text, caretPosition.fromBytes, [':']);
+                            if (currentWord.length > 2
+                                && currentWord.substr(0, 1) === ':') {
+                                let unicodeEmoji = emojione.shortnameToUnicode(currentWord);
+                                if (unicodeEmoji && unicodeEmoji !== currentWord) {
+                                    return insertEmoji(unicodeEmoji,
+                                        caretPosition.from - currentWord.length,
+                                        caretPosition.to);
+                                }
+                            }
                         }
 
-                        // Notify about typing event
-                        scope.onTyping(composeDiv[0].innerText);
+                        // Update typing information (use text instead method)
+                        if (text.trim().length === 0) {
+                            stopTyping();
+                        } else {
+                            startTyping();
+                        }
+                        scope.onTyping(text.trim());
 
                         updateView();
                     }, 0);
@@ -288,6 +354,14 @@ export default [
                                 size: file.size,
                                 data: buffer,
                             };
+
+                            // Workaround for https://bugzilla.mozilla.org/show_bug.cgi?id=1240259
+                            if (browserService.getBrowser().firefox) {
+                                if (fileMessageData.name.endsWith('.ogg') && fileMessageData.fileType === 'video/ogg') {
+                                    fileMessageData.fileType = 'audio/ogg';
+                                }
+                            }
+
                             fileMessages.push(fileMessageData);
                         });
                         scope.submit('file', fileMessages);
@@ -435,7 +509,10 @@ export default [
                 // Emoji is chosen
                 function onEmojiChosen(ev: MouseEvent): void {
                     ev.stopPropagation();
-                    const emoji = this.textContent; // Unicode character
+                    insertEmoji (this.textContent);
+                }
+
+                function insertEmoji(emoji, posFrom = null, posTo = null): void {
                     const formatted = ($filter('emojify') as any)(emoji, true, true);
 
                     // In Chrome in right-to-left mode, our content editable
@@ -472,25 +549,32 @@ export default [
                     }
 
                     if (caretPosition !== null) {
-                        currentHTML = currentHTML.substr(0, caretPosition.from)
+                        posFrom = null === posFrom ? caretPosition.from : posFrom;
+                        posTo = null === posTo ? caretPosition.to : posTo;
+                        currentHTML = currentHTML.substr(0, posFrom)
                             + formatted
-                            + currentHTML.substr(caretPosition.to);
+                            + currentHTML.substr(posTo);
 
                         // change caret position
                         caretPosition.from += formatted.length - 1;
-                        caretPosition.to = caretPosition.from;
+                        caretPosition.fromBytes++;
                     } else {
                         // insert at the end of line
+                        posFrom = currentHTML.length;
                         currentHTML += formatted;
                         caretPosition = {
                             from: currentHTML.length,
-                            to: currentHTML.length,
                         };
                     }
+                    caretPosition.to = caretPosition.from;
+                    caretPosition.toBytes = caretPosition.fromBytes;
 
                     contentElement.innerHTML = currentHTML;
                     cleanupComposeContent();
-                    setCaretPosition(caretPosition.from);
+                    setCaretPosition(posFrom);
+
+                    // Update the draft text
+                    scope.onTyping(getText());
 
                     updateView();
                 }
@@ -531,7 +615,7 @@ export default [
 
                 // Set all correct styles
                 function updateView() {
-                    if (composeDiv[0].innerHTML.length === 0) {
+                    if (composeAreaIsEmpty()) {
                         sendTrigger.removeClass(TRIGGER_ENABLED_CSS_CLASS);
                     } else {
                         sendTrigger.addClass(TRIGGER_ENABLED_CSS_CLASS);
@@ -546,31 +630,42 @@ export default [
                 }
 
                 // return the html code position of the container element
-                function getHTMLPosition(offset: number, container: Node) {
+                function getPositions(offset: number, container: Node): {html: number, text: number} {
                     let pos = null;
+                    let textPos = null;
+
                     if (composeDiv[0].contains(container)) {
                         let selectedElement;
                         if (container === composeDiv[0]) {
                             if (offset === 0) {
-                                return 0;
+                                return {
+                                    html: 0, text: 0,
+                                };
                             }
                             selectedElement = composeDiv[0].childNodes[offset - 1];
                             pos = 0;
+                            textPos = 0;
                         } else {
                             selectedElement =  container.previousSibling;
                             pos = offset;
+                            textPos = offset;
                         }
 
                         while (selectedElement !== null) {
                             if (selectedElement.nodeType === Node.TEXT_NODE) {
                                 pos += selectedElement.textContent.length;
+                                textPos += selectedElement.textContent.length;
                             } else {
                                 pos += getOuterHtml(selectedElement).length;
+                                textPos += 1;
                             }
                             selectedElement = selectedElement.previousSibling;
                         }
                     }
-                    return pos;
+                    return {
+                        html: pos,
+                        text: textPos,
+                    };
                 }
 
                 // Update the current caret position or selection
@@ -580,11 +675,15 @@ export default [
                         const selection = window.getSelection();
                         if (selection.rangeCount) {
                             const range = selection.getRangeAt(0);
-                            let from = getHTMLPosition(range.startOffset, range.startContainer);
-                            if (from !== null && from >= 0) {
+                            let from = getPositions(range.startOffset, range.startContainer);
+                            if (from !== null && from.html >= 0) {
+                                const to = getPositions(range.endOffset, range.endContainer);
+
                                 caretPosition = {
-                                    from: from,
-                                    to: getHTMLPosition(range.endOffset, range.endContainer),
+                                    from: from.html,
+                                    to: to.html,
+                                    fromBytes: from.text,
+                                    toBytes: to.text,
                                 };
                             }
                         }
@@ -626,7 +725,6 @@ export default [
                         if (pos < size) {
                             // use this node
                             rangeAt(node, offset);
-                            this.stop = true;
                         } else if (i === composeDiv[0].childNodes.length - 1) {
                             rangeAt(node);
                         }
@@ -635,12 +733,13 @@ export default [
                 }
 
                 // Handle typing events
-                composeDiv.on('keydown', onTyping);
+                composeDiv.on('keydown', onKeyDown);
+                composeDiv.on('keyup', onKeyUp);
                 composeDiv.on('keyup mouseup', updateCaretPosition);
                 composeDiv.on('selectionchange', updateCaretPosition);
 
                 // When switching chat, send stopTyping message
-                scope.$on('$destroy', scope.stopTyping);
+                scope.$on('$destroy', stopTyping);
 
                 // Handle paste event
                 composeDiv.on('paste', onPaste);
